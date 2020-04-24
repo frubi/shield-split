@@ -1,11 +1,32 @@
 package main
 
 import (
-	"bytes"
+	"debug/pe"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
+	"strconv"
+	"strings"
 )
+
+func readString(b []byte) (string, int) {
+	sb := strings.Builder{}
+	sb.Grow(len(b))
+
+	offset := 0
+	for {
+		if b[offset] != 0 {
+			sb.WriteByte(b[offset])
+			offset += 2
+		} else {
+			break
+		}
+	}
+
+	return sb.String(), offset + 2
+}
 
 func main() {
 	if len(os.Args) != 2 {
@@ -13,41 +34,66 @@ func main() {
 		return
 	}
 
-	exe, err := ioutil.ReadFile(os.Args[1])
+	exe, err := os.Open(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	defer exe.Close()
+
+	p, err := pe.NewFile(exe)
 	if err != nil {
 		panic(err)
 	}
 
-	magic := []byte{'I', 'S', 'c', '(', '`', 0x09}
-	tbl := make([]int, 0)
-
-	for offset := 0; offset < len(exe)-len(magic); offset++ {
-		if bytes.HasPrefix(exe[offset:], magic) {
-			fmt.Printf("found file at %d (0x%X)\n", offset, offset)
-			tbl = append(tbl, offset)
+	endOfPE := int64(0)
+	for _, section := range p.Sections {
+		endOfSection := int64(section.Offset + section.Size)
+		if endOfSection > endOfPE {
+			endOfPE = endOfSection
 		}
 	}
 
-	if len(tbl) != 3 {
-		fmt.Println("Invalid number of files:", len(tbl))
-		return
+	fmt.Printf("endOfPE = 0x%X\n", endOfPE)
+	exe.Seek(endOfPE, io.SeekStart)
+
+	packed, err := ioutil.ReadAll(exe)
+	if err != nil {
+		panic(err)
 	}
 
-	files := []struct {
-		name  string
-		start int
-		end   int
-	}{
-		{"data1.hdr", tbl[2], len(exe)},
-		{"data1.cab", tbl[0], tbl[1]},
-		{"data2.cab", tbl[1], tbl[2]},
-	}
+	blockCount := int(binary.LittleEndian.Uint32(packed))
+	fmt.Printf("blockCount = %d\n", blockCount)
 
-	for _, file := range files {
-		fmt.Println("Writing", file.name)
-		err = ioutil.WriteFile(file.name, exe[file.start:file.end], 0644)
+	offset := 4
+	for blockNum := 1; blockNum <= blockCount; blockNum++ {
+		fmt.Printf("Block %d:\n", blockNum)
+
+		shortName, strLen := readString(packed[offset:])
+		fmt.Printf("  shortName = %q\n", shortName)
+		offset += strLen
+
+		fullName, strLen := readString(packed[offset:])
+		fmt.Printf("  fullName = %q\n", fullName)
+		offset += strLen
+
+		versionStr, strLen := readString(packed[offset:])
+		fmt.Printf("  versionStr = %q\n", versionStr)
+		offset += strLen
+
+		lengthStr, strLen := readString(packed[offset:])
+		fmt.Printf("  lengthStr = %q\n", lengthStr)
+		offset += strLen
+
+		length, err := strconv.Atoi(lengthStr)
 		if err != nil {
 			panic(err)
 		}
+
+		err = ioutil.WriteFile(shortName, packed[offset:offset+length], 0644)
+		if err != nil {
+			panic(err)
+		}
+
+		offset += length
 	}
 }
